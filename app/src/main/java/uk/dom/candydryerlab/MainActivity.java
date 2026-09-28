@@ -752,38 +752,36 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         }
 
         probeProgress("NOTIFYING DRYER",
-                "GPO is STATE CONTROL. Holding it LOW while the dryer reads the query…");
+                "Keep the phone still while the dryer is notified…");
 
-        boolean released=false;
+        boolean raised=false;
         try{
             setGpoState(iso,0x00,label+" GPO LOW",log);
+            Thread.sleep(1200);
+            setGpoState(iso,0x01,label+" GPO HIGH",log);
+            raised=true;
 
             byte[] last=null;
-            for(int i=0;i<8;i++){
-                probeProgress("WAITING FOR DRYER","GPO LOW • waiting for MCU response… "+(i+1)+"/8");
-                Thread.sleep(250);
-                last=readNdefFile(iso,commandFile,label+" LOW POLL "+(i+1),log);
-
+            for(int i=0;i<20;i++){
+                probeProgress("WAITING FOR DRYER","Waiting for response… "+(i+1)+"/20");
+                Thread.sleep(350);
+                last=readNdefFile(iso,commandFile,label+" POLL "+(i+1),log);
                 if(last!=null && last.length>=8){
                     int marker=last[4]&255;
                     int gotAction=last[5]&255;
-                    if(marker==0x00 && gotAction==action){
-                        setGpoState(iso,0x01,label+" GPO RELEASE",log);
-                        released=true;
+                    if(gotAction==action && marker!=0x80){
                         probeProgress("RESPONSE RECEIVED",
-                                "Dryer acknowledged opcode 0x"+String.format(Locale.ROOT,"%02X",action)+".");
+                                "Dryer returned action 0x"+String.format(Locale.ROOT,"%02X",action)+".");
                         return last;
                     }
                 }
             }
 
-            setGpoState(iso,0x01,label+" GPO RELEASE",log);
-            released=true;
             restoreMailbox(iso,commandFile,restoreRecord,label,log);
-            throw new Exception("no ACK while GPO held LOW for ~2.0 s; mailbox restored; last response "+hex(last));
+            throw new Exception("no dryer response after GPO pulse; mailbox restored; last response "+hex(last));
         }finally{
-            if(!released){
-                try{setGpoState(iso,0x01,label+" GPO FAILSAFE RELEASE",log);}catch(Exception ignored){}
+            if(!raised){
+                try{setGpoState(iso,0x01,label+" GPO FAILSAFE HIGH",log);}catch(Exception ignored){}
             }
         }
     }
