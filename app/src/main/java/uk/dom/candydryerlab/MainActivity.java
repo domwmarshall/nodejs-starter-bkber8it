@@ -44,9 +44,11 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
     private NfcAdapter nfc;
     private GaugeView gauge;
     private TextView state, hint, moisture, temperature, load, remaining, stats, raw;
-    private Button share, deep;
-    private volatile boolean deepScanArmed=false;
+    private Button share, labelButton;
     private SharedPreferences prefs;
+    private String captureLabel="Baseline";
+    private int captureLabelIndex=0;
+    private final String[] captureLabels={"Baseline","After Candy Statistics","After Candy Check-up","After Candy Programme","Dryer Running","Cycle Finished"};
     private String lastCapture="No capture yet.";
     private int scanCount=0;
 
@@ -71,7 +73,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         LinearLayout hero=card(); hero.setGravity(Gravity.CENTER_HORIZONTAL); hero.setPadding(dp(18),dp(18),dp(18),dp(18));
         state=txt("READY FOR NFC",13,CYAN,true); state.setGravity(Gravity.CENTER); hero.addView(state);
         gauge=new GaugeView(this); hero.addView(gauge,new LinearLayout.LayoutParams(dp(250),dp(190)));
-        hint=txt("Turn the dryer dial to Smart Touch, then hold your phone against the NFC logo.",14,MUTED,false);
+        hint=txt("Passive NFC reader. It sends no appliance commands. Use the Candy app for a function, then return here and scan to inspect the response left by the dryer.",14,MUTED,false);
         hint.setGravity(Gravity.CENTER); hint.setPadding(dp(8),0,dp(8),0); hero.addView(hint);
         root.addView(hero,lp(-1,-2,0,0,0,16));
 
@@ -110,24 +112,22 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
 
         section(root,"STATISTICS & DIAGNOSTICS");
         LinearLayout diag=card();
-        stats=txt("Total NFC scans   "+scanCount+"\nProduct code      31101151\nStatus payload    awaiting scan\nDeep diagnostics  not run yet",15,TEXT,false); diag.addView(stats);
+        stats=txt("Total NFC scans    "+scanCount+"\nProduct code       31101151\nIdentity/status    awaiting scan\nLast response      awaiting scan",15,TEXT,false); diag.addView(stats);
         ProgressBar confidence=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);
         confidence.setMax(100); confidence.setProgress(25); diag.addView(confidence,lp(-1,dp(10),0,14,0,4));
         TextView conf=txt("Protocol map  •  transport known, dryer fields awaiting first capture",12,MUTED,false); diag.addView(conf);
         raw=txt("Raw NFC data will appear here after a scan.",12,MUTED,false); raw.setTypeface(Typeface.MONOSPACE); raw.setPadding(0,dp(14),0,dp(8)); diag.addView(raw);
-        deep=button("ARM DEEP READ",false);
-        deep.setOnClickListener(v->{
-            deepScanArmed=true;
-            deep.setText("DEEP READ ARMED — TAP DRYER");
-            state.setText("DEEP READ ARMED");
-            state.setTextColor(AMBER);
-            hint.setText("Hold the phone against Smart Touch. This sends only documented read/diagnostic queries — never start/test-cycle commands.");
+        labelButton=button("CAPTURE AS: BASELINE",false);
+        labelButton.setOnClickListener(v->{
+            captureLabelIndex=(captureLabelIndex+1)%captureLabels.length;
+            captureLabel=captureLabels[captureLabelIndex];
+            labelButton.setText("CAPTURE AS: "+captureLabel.toUpperCase(Locale.UK));
         });
-        diag.addView(deep,lp(-1,dp(50),0,10,0,0));
+        diag.addView(labelButton,lp(-1,dp(50),0,10,0,0));
         share=button("SHARE CAPTURE",true); share.setEnabled(false); share.setAlpha(.45f); share.setOnClickListener(v->shareCapture()); diag.addView(share,lp(-1,dp(50),0,10,0,0));
         root.addView(diag,lp(-1,-2,0,0,0,16));
 
-        TextView footer=txt("Passive scan by default  •  Deep Read uses diagnostic/read opcodes only",11,MUTED,false);
+        TextView footer=txt("Passive response inspector  •  No command writes, heater or motor control",11,MUTED,false);
         footer.setGravity(Gravity.CENTER); root.addView(footer);
         return sv;
     }
@@ -211,26 +211,8 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
                 try{result.command=readNdefFile(iso,commandFile,"COMMAND",result.log);}
                 catch(Exception e){result.log.add("COMMAND read: "+e.getMessage());}
             }
-
             decodeStatus(result);
             decodeCommand(result);
-
-            if(deepScanArmed && commandFile!=null){
-                result.deepAttempted=true;
-                // Known read-only commands from the Candy Smart Touch protocol family.
-                // Deliberately excludes STORE/START/LINE-TEST opcodes 0A/0B/0C.
-                int[] actions={0x11,0x06,0x07,0x08};
-                String[] names={"DRYING_COUNTERS","LAST_ERROR","MAIN_SW","UI_SW"};
-                for(int i=0;i<actions.length;i++){
-                    try{
-                        byte[] reply=queryReadCommand(iso,commandFile,actions[i],names[i],result.log);
-                        result.probes.add(names[i]+" (0x"+String.format(Locale.ROOT,"%02X",actions[i])+") = "+hex(reply));
-                    }catch(Exception e){
-                        result.probes.add(names[i]+" FAILED: "+e.getMessage());
-                    }
-                }
-                deepScanArmed=false;
-            }
             result.ok=result.status!=null&&result.status.length>0;
         }catch(Exception e){
             result.error=e.getClass().getSimpleName()+": "+e.getMessage();
@@ -318,62 +300,6 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         byte[] d=new byte[r.length-2]; System.arraycopy(r,0,d,0,d.length); return d;
     }
 
-    private byte[] queryReadCommand(IsoDep iso,NdefFileInfo file,int action,String name,List<String> log)throws Exception{
-        selectNdefApp(iso,name,log);
-        byte hi=(byte)((file.id>>8)&255), lo=(byte)(file.id&255);
-        requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x00,0x0C,0x02,hi,lo},name+" SELECT COMMAND FILE",log),name+" command select");
-
-        byte[] verify=new byte[21];
-        verify[0]=0x00; verify[1]=0x20; verify[2]=0x00; verify[3]=0x02; verify[4]=0x10;
-        requireOk(x(iso,verify,name+" VERIFY WRITE",log),name+" verify");
-
-        byte[] record=buildSimpleQuery(action);
-        requireOk(x(iso,new byte[]{0x00,(byte)0xD6,0x00,0x00,0x02,0x00,0x00},name+" INVALIDATE NLEN",log),name+" invalidate");
-
-        byte[] write=new byte[5+record.length];
-        write[0]=0x00; write[1]=(byte)0xD6; write[2]=0x00; write[3]=0x02; write[4]=(byte)record.length;
-        System.arraycopy(record,0,write,5,record.length);
-        requireOk(x(iso,write,name+" WRITE QUERY",log),name+" write");
-
-        byte[] commit=new byte[]{0x00,(byte)0xD6,0x00,0x00,0x02,0x00,(byte)record.length};
-        requireOk(x(iso,commit,name+" COMMIT NLEN",log),name+" commit");
-
-        Thread.sleep(200);
-        pulseGpo(iso,0x00,name+" GPO LOW",log);
-        Thread.sleep(1200);
-        pulseGpo(iso,0x01,name+" GPO HIGH",log);
-
-        for(int i=0;i<8;i++){
-            Thread.sleep(350);
-            byte[] reply=readNdefFile(iso,file,name+" RESPONSE",log);
-            if(reply!=null && reply.length>=8 && (reply[4]&255)==0x00 && (reply[5]&255)==action) return reply;
-            if(reply!=null && reply.length>=6 && (reply[4]&255)==0x00 && (reply[5]&255)==action) return reply;
-        }
-        throw new Exception("No MCU response/ACK");
-    }
-
-    private void pulseGpo(IsoDep iso,int value,String label,List<String> log)throws Exception{
-        selectNdefApp(iso,label,log);
-        requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x00,0x0C,0x02,(byte)0xE1,0x01},label+" SELECT SYSTEM",log),label+" system select");
-        requireOk(x(iso,new byte[]{(byte)0xA2,(byte)0xD6,0x00,0x1F,0x01,(byte)value},label,log),label);
-    }
-
-    private static byte[] buildSimpleQuery(int action){
-        byte[] record=new byte[]{(byte)0xD4,0x01,0x04,0x02,(byte)0x80,(byte)action,0x00,0x00};
-        int crc=crc16(new byte[]{(byte)0x80,(byte)action});
-        record[6]=(byte)((crc>>8)&255); record[7]=(byte)(crc&255);
-        return record;
-    }
-
-    private static int crc16(byte[] data){
-        int v=0xFFFF;
-        for(byte bb:data){
-            v^=(bb&255);
-            for(int n=0;n<8;n++) v=((v&1)!=0)?((v>>>1)^0x6363):(v>>>1);
-        }
-        return (~v)&0xFFFF;
-    }
-
     private static void decodeStatus(ScanResult r){
         byte[] s=r.status;
         if(s==null||s.length<8)return;
@@ -416,13 +342,55 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
             if(pstart+plen<=q.length && plen>=4){
                 r.commandMarker=q[pstart]&255;
                 r.commandAction=q[pstart+1]&255;
-                int dataLen=plen-2;
-                byte[] crcData=new byte[dataLen];
-                System.arraycopy(q,pstart,crcData,0,dataLen);
+                int crcDataLen=plen-2;
+                byte[] crcData=new byte[crcDataLen];
+                System.arraycopy(q,pstart,crcData,0,crcDataLen);
                 int got=((q[pstart+plen-2]&255)<<8)|(q[pstart+plen-1]&255);
                 r.commandCrcValid=crc16(crcData)==got;
+                if(plen>4){
+                    int dataLen=plen-4;
+                    r.commandData=new byte[dataLen];
+                    System.arraycopy(q,pstart+2,r.commandData,0,dataLen);
+                }else r.commandData=new byte[0];
             }
         }catch(Exception ignored){}
+    }
+
+    private static int crc16(byte[] data){
+        int v=0xFFFF;
+        for(byte bb:data){
+            v^=(bb&255);
+            for(int n=0;n<8;n++) v=((v&1)!=0)?((v>>>1)^0x6363):(v>>>1);
+        }
+        return (~v)&0xFFFF;
+    }
+
+    private static String changedBytes(String previousHex,byte[] now){
+        if(previousHex==null||previousHex.length()==0||now==null)return "First captured response";
+        String clean=previousHex.replace(" ","").trim();
+        if(clean.length()%2!=0)return "Previous response unavailable";
+        byte[] prev=new byte[clean.length()/2];
+        try{
+            for(int i=0;i<prev.length;i++)prev[i]=(byte)Integer.parseInt(clean.substring(i*2,i*2+2),16);
+        }catch(Exception e){return "Previous response unavailable";}
+        if(prev.length==now.length){
+            boolean same=true; for(int i=0;i<now.length;i++)if(prev[i]!=now[i]){same=false;break;}
+            if(same)return "Unchanged from previous capture";
+        }
+        StringBuilder s=new StringBuilder("Changed bytes: ");
+        int max=Math.max(prev.length,now.length), shown=0;
+        for(int i=0;i<max && shown<12;i++){
+            int a=i<prev.length?(prev[i]&255):-1, b=i<now.length?(now[i]&255):-1;
+            if(a!=b){
+                if(shown++>0)s.append(", ");
+                s.append(i).append(":");
+                s.append(a<0?"--":String.format(Locale.ROOT,"%02X",a));
+                s.append("→");
+                s.append(b<0?"--":String.format(Locale.ROOT,"%02X",b));
+            }
+        }
+        if(shown==0)return "Response length changed";
+        return s.toString();
     }
 
     private byte[] x(IsoDep iso,byte[] cmd,String label,List<String> log)throws Exception{
@@ -440,41 +408,50 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
             share.setEnabled(true); share.setAlpha(1f);
             return;
         }
-        scanCount++; prefs.edit().putInt("scans",scanCount).apply();
+        scanCount++;
+        String previous=prefs.getString("last_command_hex","");
+        String change=changedBytes(previous,r.command);
+        prefs.edit().putInt("scans",scanCount).putString("last_command_hex",hex(r.command)).apply();
         gauge.setValue(100); gauge.setCenter("LINK","LIVE");
-        state.setText(r.deepAttempted?"DEEP READ COMPLETE":"DRYER CONNECTED"); state.setTextColor(GREEN);
-        hint.setText(r.deepAttempted?"Diagnostics captured. Share this capture so the returned fields can be mapped.":"Identity/status decoded. Arm Deep Read to query drying counters, firmware and last-error data.");
-        if(deep!=null){deep.setText("ARM DEEP READ");deep.setEnabled(true);}
+        state.setText("DRYER CONNECTED"); state.setTextColor(GREEN);
+        hint.setText(change+". For useful mapping, run one function in the Candy app, then come straight back and scan again.");
         int sb=r.status==null?0:r.status.length, cb=r.command==null?0:r.command.length;
         moisture.setText("--"); temperature.setText("-- °C"); load.setText("-- kg"); remaining.setText("--");
-        stats.setText(statsText(r,sb,cb));
+        stats.setText(statsText(r,sb,cb,change));
         String ascii=printable(r.status);
         String when=new SimpleDateFormat("dd MMM HH:mm:ss",Locale.UK).format(new Date());
-        String probeText=r.probes.isEmpty()?"—":join(r.probes);
-        lastCapture="Candy Dryer Lab capture\nModel: CS C10DF-80 / 31101151\nTime: "+when+
-                "\nTech: "+r.tech+"\nURI: "+r.uri+"\nIdentity: "+r.identity+"\nProduct code: "+r.productCode+
-                "\nDescriptor: "+r.descriptor+"\nStatus CRC valid: "+r.statusCrcValid+
+        lastCapture="Candy Dryer Lab passive capture\nContext: "+captureLabel+
+                "\nModel: CS C10DF-80 / 31101151\nTime: "+when+
+                "\nTech: "+r.tech+"\nURI: "+r.uri+"\nIdentity: "+r.identity+
+                "\nProduct code: "+r.productCode+"\nDescriptor: "+r.descriptor+
+                "\nStatus CRC valid: "+r.statusCrcValid+
+                "\nResponse marker: "+r.commandMarker+
+                "\nResponse action: 0x"+String.format(Locale.ROOT,"%02X",r.commandAction)+
+                "\nResponse data: "+hex(r.commandData)+
+                "\nResponse CRC valid: "+r.commandCrcValid+
+                "\nResponse comparison: "+change+
                 "\nCC: "+hex(r.cc)+"\nSTATUS: "+hex(r.status)+"\nSTATUS ASCII: "+ascii+
-                "\nCOMMAND: "+hex(r.command)+"\nCommand marker: "+r.commandMarker+" action: 0x"+String.format(Locale.ROOT,"%02X",r.commandAction)+
-                " CRC valid: "+r.commandCrcValid+"\n\nDEEP PROBES\n"+probeText+"\nAPDU LOG\n"+join(r.log);
-        raw.setText("URI  "+r.uri+
+                "\nCOMMAND: "+hex(r.command)+"\n\nAPDU LOG\n"+join(r.log);
+        raw.setText("CONTEXT  "+captureLabel+
+                "\nURI  "+r.uri+
                 "\nIDENTITY  "+r.identity+
                 "\nPRODUCT  "+r.productCode+
                 "\nDESCRIPTOR  "+r.descriptor+
-                "\nSTATUS CRC  "+(r.statusCrcValid?"VALID":"UNKNOWN/INVALID")+
-                "\nLAST CMD  "+(r.commandMarker==0?"response":"command")+"  action 0x"+String.format(Locale.ROOT,"%02X",r.commandAction)+
-                "  CRC "+(r.commandCrcValid?"VALID":"?")+
-                (r.probes.isEmpty()?"":"\n\nDEEP READ\n"+probeText)+
+                "\nSTATUS CRC  "+(r.statusCrcValid?"VALID":"?")+
+                "\nRESPONSE  marker "+r.commandMarker+"  action 0x"+String.format(Locale.ROOT,"%02X",r.commandAction)+
+                "  data "+hex(r.commandData)+"  CRC "+(r.commandCrcValid?"VALID":"?")+
+                "\nCOMPARE  "+change+
                 "\n\nSTATUS HEX\n"+hex(r.status)+"\n\nCOMMAND HEX\n"+hex(r.command));
         share.setEnabled(true); share.setAlpha(1f);
     }
 
-    private String statsText(ScanResult r,int sb,int cb){
-        return "Total NFC scans   "+scanCount+"\n"+
-               "Product code      "+(r.productCode==null?"—":r.productCode)+"\n"+
-               "Status payload    "+(sb==0?"—":sb+" bytes")+"  • CRC "+(r.statusCrcValid?"valid":"?")+"\n"+
-               "Command payload   "+(cb==0?"—":cb+" bytes")+"  • action 0x"+String.format(Locale.ROOT,"%02X",r.commandAction)+"\n"+
-               "Deep diagnostics  "+(r.deepAttempted?"captured":"not run yet");
+    private String statsText(ScanResult r,int sb,int cb,String change){
+        return "Total NFC scans    "+scanCount+"\n"+
+               "Product code       "+(r.productCode==null?"—":r.productCode)+"\n"+
+               "Identity CRC       "+(r.statusCrcValid?"valid":"unknown")+"\n"+
+               "Last response      action 0x"+String.format(Locale.ROOT,"%02X",r.commandAction)+"  •  "+(r.commandCrcValid?"CRC valid":"CRC ?")+"\n"+
+               "Response payload   "+(r.commandData==null?"—":r.commandData.length+" data bytes")+"\n"+
+               "Comparison         "+change;
     }
     private void showError(String s){gauge.setValue(5);state.setText("NFC TAG SEEN");state.setTextColor(AMBER);hint.setText(s);}
     private void shareCapture(){
@@ -494,12 +471,11 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         }
     }
     private static class ScanResult{
-        boolean ok, statusCrcValid, commandCrcValid, deepAttempted;
+        boolean ok,statusCrcValid,commandCrcValid;
         String tech,error,uri,statusType,identity,productCode,descriptor;
-        int commandMarker=-1, commandAction=-1;
-        byte[] cc,status,command;
+        int commandMarker=-1,commandAction=-1;
+        byte[] cc,status,command,commandData;
         List<String> log=new ArrayList<>();
-        List<String> probes=new ArrayList<>();
     }
     private abstract static class SimpleSeek implements SeekBar.OnSeekBarChangeListener{
         public void onStartTrackingTouch(SeekBar s){} public void onStopTrackingTouch(SeekBar s){}
