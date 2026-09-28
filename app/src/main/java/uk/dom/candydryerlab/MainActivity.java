@@ -57,7 +57,8 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
     private TextView moisture, temperature, load, remaining;
     private TextView identityText, responseText, historyText, rawText;
     private TextView scanCountText, uniqueResponseText, lastSeenText;
-    private Button stageButton, shareButton;
+    private Button stageButton, shareButton, statsProbeButton;
+    private volatile boolean statsProbeArmed=false;
 
     private int scanCount;
     private String stage="Idle";
@@ -197,6 +198,21 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         learnActions.addView(new View(this),sp);
         learnActions.addView(shareButton,new LinearLayout.LayoutParams(0,dp(48),1));
         learn.addView(learnActions,lp(-1,dp(48),0,14,0,0));
+
+        statsProbeButton=button("READ DRYING COUNTERS",false);
+        statsProbeButton.setOnClickListener(v->{
+            statsProbeArmed=true;
+            statsProbeButton.setText("ARMED — HOLD PHONE ON SMART TOUCH");
+            statsProbeButton.setEnabled(false);
+            linkState.setText("DRYING COUNTER PROBE ARMED");
+            linkState.setTextColor(AMBER);
+            linkHint.setText("Keep the phone firmly on the Smart Touch area for about 3 seconds. This sends only the documented read opcode 0x11.");
+        });
+        learn.addView(statsProbeButton,lp(-1,dp(50),0,12,0,0));
+
+        TextView probeNote=txt("Experimental interoperability probe: one read-only opcode (0x11) only. No start/store/line-test commands are sent.",11,MUTED,false);
+        learn.addView(probeNote);
+
         root.addView(learn,lp(-1,-2,0,0,0,16));
 
         section(root,"PROGRAMME STUDIO");
@@ -276,7 +292,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         protocol.addView(rawText);
         root.addView(protocol,lp(-1,-2,0,0,0,16));
 
-        TextView footer=txt("Dryer Lab MK8  •  account-free  •  no Internet permission  •  read-only NFC",11,MUTED,false);
+        TextView footer=txt("Dryer Lab MK9  •  account-free  •  no Internet permission  •  passive scan + read-only counter probe",11,MUTED,false);
         footer.setGravity(Gravity.CENTER);
         root.addView(footer);
         return sv;
@@ -468,6 +484,18 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
                 }
             }
 
+            if(statsProbeArmed && commandFile!=null){
+                statsProbeArmed=false;
+                result.probeAttempted=true;
+                try{
+                    result.probeResponse=runReadOnlyProbe(iso,commandFile,0x11,"DRYING COUNTERS",result.log);
+                    result.probeSuccess=result.probeResponse!=null;
+                }catch(Exception e){
+                    result.probeError=e.getClass().getSimpleName()+": "+e.getMessage();
+                    result.log.add("PROBE ERROR: "+result.probeError);
+                }
+            }
+
             decodeStatus(result);
             decodeCommand(result);
             result.ok=result.status!=null&&result.status.length>0;
@@ -556,6 +584,84 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
     private void selectNdefApp(IsoDep iso,String label,List<String> log)throws Exception{
         requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x04,0x00,0x07,(byte)0xD2,0x76,0x00,0x00,(byte)0x85,0x01,0x01,0x00},
                 label+" SELECT NDEF APP",log),label+" NDEF app");
+    }
+
+    private byte[] runReadOnlyProbe(IsoDep iso,NdefFileInfo commandFile,int action,String label,List<String> log)throws Exception{
+        selectNdefApp(iso,label,log);
+        byte hi=(byte)((commandFile.id>>8)&255);
+        byte lo=(byte)(commandFile.id&255);
+        requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x00,0x0C,0x02,hi,lo},
+                label+" SELECT COMMAND FILE",log),label+" command select");
+
+        // Empty VERIFY is only a lock-state probe and does not consume retries.
+        byte[] lockProbe=x(iso,new byte[]{0x00,0x20,0x00,0x02,0x00},
+                label+" VERIFY STATUS",log);
+        if(isOk(lockProbe)){
+            log.add(label+" write area already unlocked");
+        }else if(lockProbe.length>=2 && (lockProbe[lockProbe.length-2]&255)==0x63){
+            byte[] verify=new byte[21];
+            verify[0]=0x00; verify[1]=0x20; verify[2]=0x00; verify[3]=0x02; verify[4]=0x10;
+            byte[] vr=x(iso,verify,label+" VERIFY 16-ZERO WRITE PASSWORD",log);
+            if(!isOk(vr)){
+                throw new Exception("write password rejected "+hex(vr)+"; stopped without retrying");
+            }
+        }else{
+            throw new Exception("unexpected VERIFY status "+hex(lockProbe));
+        }
+
+        byte[] record=buildReadRecord(action);
+        requireOk(x(iso,new byte[]{0x00,(byte)0xD6,0x00,0x00,0x02,0x00,0x00},
+                label+" INVALIDATE NLEN",log),label+" invalidate");
+
+        byte[] write=new byte[5+record.length];
+        write[0]=0x00; write[1]=(byte)0xD6; write[2]=0x00; write[3]=0x02; write[4]=(byte)record.length;
+        System.arraycopy(record,0,write,5,record.length);
+        requireOk(x(iso,write,label+" WRITE READ-QUERY",log),label+" query write");
+
+        byte[] commit=new byte[]{0x00,(byte)0xD6,0x00,0x00,0x02,0x00,(byte)record.length};
+        requireOk(x(iso,commit,label+" COMMIT NLEN",log),label+" commit");
+
+        Thread.sleep(200);
+        pulseGpo(iso,0x00,label+" GPO LOW",log);
+        Thread.sleep(1200);
+        pulseGpo(iso,0x01,label+" GPO HIGH",log);
+
+        byte[] last=null;
+        for(int i=0;i<10;i++){
+            Thread.sleep(350);
+            last=readNdefFile(iso,commandFile,label+" POLL "+(i+1),log);
+            if(last!=null && last.length>=8){
+                int marker=last[4]&255;
+                int gotAction=last[5]&255;
+                if(marker==0x00 && gotAction==action){
+                    return last;
+                }
+            }
+        }
+        throw new Exception("no ACK for opcode 0x"+String.format(Locale.ROOT,"%02X",action)+
+                "; last response "+hex(last));
+    }
+
+    private void pulseGpo(IsoDep iso,int value,String label,List<String> log)throws Exception{
+        selectNdefApp(iso,label,log);
+        requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x00,0x0C,0x02,(byte)0xE1,0x01},
+                label+" SELECT SYSTEM FILE",log),label+" system select");
+        requireOk(x(iso,new byte[]{(byte)0xA2,(byte)0xD6,0x00,0x1F,0x01,(byte)value},
+                label,log),label);
+    }
+
+    private static byte[] buildReadRecord(int action){
+        byte[] rec=new byte[8];
+        rec[0]=(byte)0xD4;
+        rec[1]=0x01;
+        rec[2]=0x04;
+        rec[3]=0x02;
+        rec[4]=(byte)0x80;
+        rec[5]=(byte)action;
+        int crc=crc16(new byte[]{rec[4],rec[5]});
+        rec[6]=(byte)((crc>>8)&255);
+        rec[7]=(byte)(crc&255);
+        return rec;
     }
 
     private byte[] x(IsoDep iso,byte[] cmd,String label,List<String> log)throws Exception{
@@ -657,6 +763,26 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         }catch(Exception ignored){}
     }
 
+    private static String decodeProbeResponse(byte[] q){
+        if(q==null)return "—";
+        if(q.length<8)return "Short response: "+hex(q);
+        int plen=q[2]&255;
+        if(4+plen>q.length)return "Malformed response: "+hex(q);
+        int marker=q[4]&255;
+        int action=q[5]&255;
+        int dataLen=Math.max(0,plen-4);
+        byte[] data=new byte[dataLen];
+        if(dataLen>0)System.arraycopy(q,6,data,0,dataLen);
+        int got=((q[4+plen-2]&255)<<8)|(q[4+plen-1]&255);
+        byte[] crcData=new byte[Math.max(0,plen-2)];
+        if(crcData.length>0)System.arraycopy(q,4,crcData,0,crcData.length);
+        boolean crc=crc16(crcData)==got;
+        return "marker="+String.format(Locale.ROOT,"%02X",marker)+
+                " action=0x"+String.format(Locale.ROOT,"%02X",action)+
+                " data="+hex(data)+
+                " CRC="+(crc?"valid":"invalid");
+    }
+
     private static int crc16(byte[] data){
         int v=0xFFFF;
         for(byte bb:data){
@@ -675,6 +801,10 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
             linkState.setTextColor(AMBER);
             linkHint.setText(r.error==null?"NFC was seen but no readable status record was returned.":r.error);
             rawText.setText(join(r.log));
+            if(statsProbeButton!=null){
+                statsProbeButton.setEnabled(true);
+                statsProbeButton.setText("READ DRYING COUNTERS");
+            }
             return;
         }
 
@@ -701,9 +831,19 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
 
         linkGauge.setValue(100);
         linkGauge.setCenter("LINK","LIVE");
-        linkState.setText("DRYER CONNECTED");
-        linkState.setTextColor(GREEN);
-        linkHint.setText(change);
+        if(resultProbeLabel(r).length()>0){
+            linkState.setText(r.probeSuccess?"DRYING COUNTERS RECEIVED":"DRYING COUNTER PROBE FAILED");
+            linkState.setTextColor(r.probeSuccess?GREEN:AMBER);
+            linkHint.setText(r.probeSuccess?decodeProbeResponse(r.probeResponse):r.probeError);
+        }else{
+            linkState.setText("DRYER CONNECTED");
+            linkState.setTextColor(GREEN);
+            linkHint.setText(change);
+        }
+        if(statsProbeButton!=null){
+            statsProbeButton.setEnabled(true);
+            statsProbeButton.setText("READ DRYING COUNTERS");
+        }
 
         identityText.setText(
                 "Product     "+safe(r.productCode)+"\n"+
@@ -727,7 +867,9 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
                 "CC\n"+hex(r.cc)+"\n\n"+
                 "STATUS\n"+hex(r.status)+"\n\n"+
                 "COMMAND/RESPONSE\n"+hex(r.command)+"\n\n"+
-                "STATUS ASCII\n"+printable(r.status)
+                "STATUS ASCII\n"+printable(r.status)+
+                (r.probeAttempted?"\n\nDRYING COUNTER PROBE\n"+
+                        (r.probeSuccess?decodeProbeResponse(r.probeResponse):"FAILED: "+r.probeError):"")
         );
 
         historyText.setText(historyDisplay());
@@ -750,6 +892,9 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
                 "Response data: "+hex(r.commandData)+"\n"+
                 "Response CRC valid: "+r.commandCrcValid+"\n"+
                 "Response comparison: "+change+"\n"+
+                "Drying counter probe attempted: "+r.probeAttempted+"\n"+
+                "Drying counter probe success: "+r.probeSuccess+"\n"+
+                "Drying counter probe result: "+(r.probeSuccess?decodeProbeResponse(r.probeResponse):safe(r.probeError))+"\n"+
                 "CC: "+hex(r.cc)+"\n"+
                 "STATUS: "+hex(r.status)+"\n"+
                 "COMMAND: "+hex(r.command)+"\n\n"+
@@ -831,6 +976,10 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         return shown==0?"Response length changed":s.toString();
     }
 
+    private String resultProbeLabel(ScanResult r){
+        return r.probeAttempted?"probe":"";
+    }
+
     private void showError(String s){
         linkGauge.setValue(5);
         linkState.setText("NFC TAG SEEN");
@@ -884,10 +1033,10 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
     }
 
     private static class ScanResult{
-        boolean ok,statusCrcValid,commandCrcValid;
-        String tech,error,uri,statusType,identity,productCode,descriptor;
+        boolean ok,statusCrcValid,commandCrcValid,probeAttempted,probeSuccess;
+        String tech,error,uri,statusType,identity,productCode,descriptor,probeError;
         int commandMarker=-1,commandAction=-1;
-        byte[] cc,status,command,commandData;
+        byte[] cc,status,command,commandData,probeResponse;
         List<String> log=new ArrayList<>();
     }
 
