@@ -178,46 +178,130 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         try{
             iso.connect(); iso.setTimeout(5000);
             result.tech=String.join(", ",tag.getTechList());
-            result.cc=readFile(iso,(byte)0xE1,(byte)0x03,"CC");
-            result.status=readFile(iso,(byte)0x00,(byte)0x01,"STATUS");
-            try{result.command=readFile(iso,(byte)0x00,(byte)0x02,"COMMAND");}catch(Exception e){result.log.add("COMMAND read: "+e.getMessage());}
+
+            // CC is NOT an NDEF file. MK3 incorrectly treated its first two bytes
+            // (CCLEN) as NLEN, then read past EOF, producing SW 62 82.
+            result.cc=readCapabilityContainer(iso,result.log);
+
+            List<NdefFileInfo> files=parseNdefFiles(result.cc);
+            result.log.add("CC parsed: "+files.size()+" NDEF file(s)");
+            NdefFileInfo statusFile=null, commandFile=null;
+            for(NdefFileInfo info:files){
+                result.log.add(String.format(Locale.ROOT,
+                        "FILE %04X max=%d read=%02X write=%02X",
+                        info.id,info.maxSize,info.readAccess,info.writeAccess));
+                if(statusFile==null && info.readAccess==0x00 && info.writeAccess==0xFF) statusFile=info;
+                if(commandFile==null && info.readAccess==0x00 && info.writeAccess!=0xFF) commandFile=info;
+            }
+            if(statusFile==null && !files.isEmpty()) statusFile=files.get(0);
+            if(commandFile==null && files.size()>1) commandFile=files.get(1);
+
+            if(statusFile!=null) result.status=readNdefFile(iso,statusFile,"STATUS",result.log);
+            if(commandFile!=null){
+                try{result.command=readNdefFile(iso,commandFile,"COMMAND",result.log);}
+                catch(Exception e){result.log.add("COMMAND read: "+e.getMessage());}
+            }
             result.ok=result.status!=null&&result.status.length>0;
-        }catch(Exception e){result.error=e.getClass().getSimpleName()+": "+e.getMessage();}
-        finally{try{iso.close();}catch(Exception ignored){}}
+        }catch(Exception e){
+            result.error=e.getClass().getSimpleName()+": "+e.getMessage();
+            result.log.add("ERROR: "+result.error);
+        }finally{
+            try{iso.close();}catch(Exception ignored){}
+        }
         main.post(()->applyScan(result));
     }
 
-    private byte[] readFile(IsoDep iso,byte hi,byte lo,String label)throws Exception{
-        List<String> logHolder=currentLog();
-        x(iso,new byte[]{0x00,(byte)0xA4,0x04,0x00,0x07,(byte)0xD2,0x76,0x00,0x00,(byte)0x85,0x01,0x01,0x00},label+" SELECT NDEF",logHolder);
-        x(iso,new byte[]{0x00,(byte)0xA4,0x00,0x0C,0x02,hi,lo},label+" SELECT FILE",logHolder);
-        byte[] n=x(iso,new byte[]{0x00,(byte)0xB0,0x00,0x00,0x02},label+" NLEN",logHolder);
-        if(n.length<4||n[n.length-2]!=(byte)0x90)throw new Exception(label+" NLEN rejected "+hex(n));
-        int len=((n[0]&255)<<8)|(n[1]&255); if(len<0||len>4096)throw new Exception(label+" invalid length "+len);
-        ByteArrayOutputStream out=new ByteArrayOutputStream(); int off=2, remain=len;
+    private byte[] readCapabilityContainer(IsoDep iso,List<String> log)throws Exception{
+        selectNdefApp(iso,"CC",log);
+        requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x00,0x0C,0x02,(byte)0xE1,0x03},"CC SELECT E103",log),"CC select");
+
+        byte[] head=x(iso,new byte[]{0x00,(byte)0xB0,0x00,0x00,0x02},"CC READ LENGTH",log);
+        requireReadable(head,"CC length");
+        if(head.length<4) throw new Exception("CC length response too short "+hex(head));
+        int ccLen=((head[0]&255)<<8)|(head[1]&255);
+        if(ccLen<7||ccLen>255) throw new Exception("Unexpected CCLEN "+ccLen);
+
+        byte[] full=x(iso,new byte[]{0x00,(byte)0xB0,0x00,0x00,(byte)ccLen},"CC READ FULL",log);
+        requireReadable(full,"CC");
+        return stripStatus(full);
+    }
+
+    private List<NdefFileInfo> parseNdefFiles(byte[] cc){
+        List<NdefFileInfo> out=new ArrayList<>();
+        if(cc==null||cc.length<7) return out;
+        int i=7;
+        while(i+1<cc.length){
+            int type=cc[i]&255;
+            if(type==0x00){i++;continue;}
+            if(type==0xFE) break;
+            int len=cc[i+1]&255;
+            if(i+2+len>cc.length) break;
+            if(type==0x04 && len>=6){
+                int id=((cc[i+2]&255)<<8)|(cc[i+3]&255);
+                int max=((cc[i+4]&255)<<8)|(cc[i+5]&255);
+                int ra=cc[i+6]&255, wa=cc[i+7]&255;
+                out.add(new NdefFileInfo(id,max,ra,wa));
+            }
+            i+=2+len;
+        }
+        return out;
+    }
+
+    private byte[] readNdefFile(IsoDep iso,NdefFileInfo info,String label,List<String> log)throws Exception{
+        selectNdefApp(iso,label,log);
+        byte hi=(byte)((info.id>>8)&255), lo=(byte)(info.id&255);
+        requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x00,0x0C,0x02,hi,lo},label+" SELECT FILE",log),label+" select");
+
+        byte[] n=x(iso,new byte[]{0x00,(byte)0xB0,0x00,0x00,0x02},label+" READ NLEN",log);
+        requireReadable(n,label+" NLEN");
+        if(n.length<4) throw new Exception(label+" NLEN response too short "+hex(n));
+        int len=((n[0]&255)<<8)|(n[1]&255);
+        int ceiling=Math.max(0,info.maxSize-2);
+        if(len<0||len>ceiling||len>4096) throw new Exception(label+" invalid NLEN "+len+" (max "+ceiling+")");
+
+        ByteArrayOutputStream out=new ByteArrayOutputStream();
+        int off=2, remain=len;
         while(remain>0){
             int take=Math.min(remain,0xE0);
-            byte[] apdu=new byte[]{0x00,(byte)0xB0,(byte)(off>>8),(byte)off,(byte)take};
-            byte[] r=x(iso,apdu,label+" READ +"+(off-2),logHolder);
-            if(r.length<2||r[r.length-2]!=(byte)0x90)throw new Exception(label+" read rejected "+hex(r));
-            out.write(r,0,r.length-2); off+=r.length-2; remain-=r.length-2;
-            if(r.length<=2)break;
+            byte[] r=x(iso,new byte[]{0x00,(byte)0xB0,(byte)(off>>8),(byte)off,(byte)take},
+                    label+" READ +"+(off-2),log);
+            requireReadable(r,label+" read");
+            int dataLen=Math.max(0,r.length-2);
+            if(dataLen>0) out.write(r,0,dataLen);
+            off+=dataLen; remain-=dataLen;
+            if(dataLen==0 || isEofWarning(r)) break;
         }
         return out.toByteArray();
     }
 
-    private final ThreadLocal<List<String>> threadLog=new ThreadLocal<>();
-    private List<String> currentLog(){List<String> l=threadLog.get();if(l==null){l=new ArrayList<>();threadLog.set(l);}return l;}
+    private void selectNdefApp(IsoDep iso,String label,List<String> log)throws Exception{
+        requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x04,0x00,0x07,(byte)0xD2,0x76,0x00,0x00,(byte)0x85,0x01,0x01,0x00},
+                label+" SELECT NDEF APP",log),label+" NDEF app");
+    }
+
+    private static boolean isOk(byte[] r){return r!=null&&r.length>=2&&(r[r.length-2]&255)==0x90&&(r[r.length-1]&255)==0x00;}
+    private static boolean isEofWarning(byte[] r){return r!=null&&r.length>=2&&(r[r.length-2]&255)==0x62&&(r[r.length-1]&255)==0x82;}
+    private static void requireOk(byte[] r,String what)throws Exception{if(!isOk(r))throw new Exception(what+" rejected "+hex(r));}
+    private static void requireReadable(byte[] r,String what)throws Exception{if(!isOk(r)&&!isEofWarning(r))throw new Exception(what+" rejected "+hex(r));}
+    private static byte[] stripStatus(byte[] r){
+        if(r==null||r.length<2)return new byte[0];
+        byte[] d=new byte[r.length-2]; System.arraycopy(r,0,d,0,d.length); return d;
+    }
+
     private byte[] x(IsoDep iso,byte[] cmd,String label,List<String> log)throws Exception{
         byte[] r=iso.transceive(cmd); log.add(label+"\n> "+hex(cmd)+"\n< "+hex(r)); return r;
     }
 
     private void applyScan(ScanResult r){
-        List<String> logs=currentLog(); r.log.addAll(logs); threadLog.remove();
         if(!r.ok){
             gauge.setValue(8); state.setText("SCAN INCOMPLETE"); state.setTextColor(AMBER);
             hint.setText(r.error==null?"NFC detected but no readable status file was returned. Keep the phone steady and try again.":r.error);
-            raw.setText(join(r.log)); return;
+            raw.setText(join(r.log));
+            String when=new SimpleDateFormat("dd MMM HH:mm:ss",Locale.UK).format(new Date());
+            lastCapture="Candy Dryer Lab incomplete capture\nModel: CS C10DF-80 / 31101151\nTime: "+when+
+                    "\nTech: "+r.tech+"\nCC: "+hex(r.cc)+"\nError: "+r.error+"\n\nAPDU LOG\n"+join(r.log);
+            share.setEnabled(true); share.setAlpha(1f);
+            return;
         }
         scanCount++; prefs.edit().putInt("scans",scanCount).apply();
         gauge.setValue(100); gauge.setCenter("LINK","LIVE");
@@ -252,6 +336,12 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
     private static String join(List<String> l){StringBuilder s=new StringBuilder();for(String x:l)s.append(x).append("\n");return s.toString();}
     private static String hex(byte[] b){if(b==null)return "—";StringBuilder s=new StringBuilder();for(byte x:b)s.append(String.format(Locale.ROOT,"%02X ",x&255));return s.toString().trim();}
 
+    private static class NdefFileInfo{
+        final int id,maxSize,readAccess,writeAccess;
+        NdefFileInfo(int id,int maxSize,int readAccess,int writeAccess){
+            this.id=id; this.maxSize=maxSize; this.readAccess=readAccess; this.writeAccess=writeAccess;
+        }
+    }
     private static class ScanResult{
         boolean ok; String tech,error; byte[] cc,status,command; List<String> log=new ArrayList<>();
     }
