@@ -57,8 +57,9 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
     private TextView moisture, temperature, load, remaining;
     private TextView identityText, responseText, historyText, rawText;
     private TextView scanCountText, uniqueResponseText, lastSeenText;
-    private Button stageButton, shareButton, statsProbeButton;
+    private Button stageButton, shareButton, statsProbeButton, sweepButton;
     private volatile boolean statsProbeArmed=false;
+    private volatile boolean safeSweepArmed=false;
 
     private int scanCount;
     private String stage="Idle";
@@ -210,7 +211,18 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         });
         learn.addView(statsProbeButton,lp(-1,dp(50),0,12,0,0));
 
-        TextView probeNote=txt("Experimental interoperability probe: one read-only opcode (0x11) only. No start/store/line-test commands are sent.",11,MUTED,false);
+        sweepButton=button("MAP SAFE READ COMMANDS",true);
+        sweepButton.setOnClickListener(v->{
+            safeSweepArmed=true;
+            sweepButton.setText("ARMED — HOLD PHONE STEADY");
+            sweepButton.setEnabled(false);
+            linkState.setText("READ-ONLY MAP ARMED");
+            linkState.setTextColor(AMBER);
+            linkHint.setText("Hold the phone on Smart Touch until the sweep finishes. Only documented read opcodes 0x01–0x09 and 0x11 are tested.");
+        });
+        learn.addView(sweepButton,lp(-1,dp(50),0,10,0,0));
+
+        TextView probeNote=txt("Experimental interoperability probes only. Start/store/factory-test opcodes 0x0A, 0x0B and 0x0C are never sent.",11,MUTED,false);
         learn.addView(probeNote);
 
         root.addView(learn,lp(-1,-2,0,0,0,16));
@@ -292,7 +304,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         protocol.addView(rawText);
         root.addView(protocol,lp(-1,-2,0,0,0,16));
 
-        TextView footer=txt("Dryer Lab MK11  •  account-free  •  state-control GPO probe  •  automatic mailbox cleanup",11,MUTED,false);
+        TextView footer=txt("Dryer Lab MK12  •  account-free  •  verified state-control handshake  •  safe read mapper",11,MUTED,false);
         footer.setGravity(Gravity.CENTER);
         root.addView(footer);
         return sv;
@@ -484,6 +496,30 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
                 }
             }
 
+            if(safeSweepArmed && commandFile!=null){
+                safeSweepArmed=false;
+                result.sweepAttempted=true;
+                int[] actions={0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x11};
+                String[] names={
+                        "PROGRAM COUNTERS","TEMPERATURE COUNTER","SPIN COUNTER",
+                        "MCU ERROR COUNTERS","DSP ERROR COUNTERS","LAST ERROR",
+                        "MAIN SW VERSION","UI SW VERSION","EEPROM CRC","DRYING COUNTERS"
+                };
+                for(int i=0;i<actions.length;i++){
+                    probeProgress("MAPPING "+(i+1)+"/"+actions.length,
+                            names[i]+" • opcode 0x"+String.format(Locale.ROOT,"%02X",actions[i]));
+                    try{
+                        byte[] rr=runReadOnlyProbe(iso,commandFile,actions[i],names[i],result.log);
+                        result.sweepResults.add(names[i]+" 0x"+String.format(Locale.ROOT,"%02X",actions[i])+
+                                " → "+decodeProbeResponse(rr));
+                    }catch(Exception e){
+                        result.sweepResults.add(names[i]+" 0x"+String.format(Locale.ROOT,"%02X",actions[i])+
+                                " → NO ACK ("+e.getMessage()+")");
+                    }
+                }
+                result.sweepSuccess=true;
+            }
+
             if(statsProbeArmed && commandFile!=null){
                 statsProbeArmed=false;
                 result.probeAttempted=true;
@@ -644,9 +680,9 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
             setGpoState(iso,0x00,label+" GPO LOW",log);
 
             byte[] last=null;
-            for(int i=0;i<16;i++){
-                probeProgress("WAITING FOR DRYER","GPO LOW • waiting for MCU response… "+(i+1)+"/16");
-                Thread.sleep(300);
+            for(int i=0;i<8;i++){
+                probeProgress("WAITING FOR DRYER","GPO LOW • waiting for MCU response… "+(i+1)+"/8");
+                Thread.sleep(250);
                 last=readNdefFile(iso,commandFile,label+" LOW POLL "+(i+1),log);
 
                 if(last!=null && last.length>=8){
@@ -665,7 +701,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
             setGpoState(iso,0x01,label+" GPO RELEASE",log);
             released=true;
             restoreMailbox(iso,commandFile,restoreRecord,label,log);
-            throw new Exception("no ACK while GPO held LOW for ~4.8 s; mailbox restored; last response "+hex(last));
+            throw new Exception("no ACK while GPO held LOW for ~2.0 s; mailbox restored; last response "+hex(last));
         }finally{
             if(!released){
                 try{setGpoState(iso,0x01,label+" GPO FAILSAFE RELEASE",log);}catch(Exception ignored){}
@@ -914,6 +950,10 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
                 statsProbeButton.setEnabled(true);
                 statsProbeButton.setText("READ DRYING COUNTERS");
             }
+            if(sweepButton!=null){
+                sweepButton.setEnabled(true);
+                sweepButton.setText("MAP SAFE READ COMMANDS");
+            }
             return;
         }
 
@@ -940,7 +980,11 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
 
         linkGauge.setValue(100);
         linkGauge.setCenter("LINK","LIVE");
-        if(resultProbeLabel(r).length()>0){
+        if(r.sweepAttempted){
+            linkState.setText("READ-ONLY MAP COMPLETE");
+            linkState.setTextColor(GREEN);
+            linkHint.setText("Safe read sweep finished. Share the capture so returned payloads can be decoded.");
+        }else if(resultProbeLabel(r).length()>0){
             linkState.setText(r.probeSuccess?"DRYING COUNTERS RECEIVED":"DRYING COUNTER PROBE FAILED");
             linkState.setTextColor(r.probeSuccess?GREEN:AMBER);
             linkHint.setText(r.probeSuccess?decodeProbeResponse(r.probeResponse):r.probeError);
@@ -952,6 +996,10 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         if(statsProbeButton!=null){
             statsProbeButton.setEnabled(true);
             statsProbeButton.setText("READ DRYING COUNTERS");
+        }
+        if(sweepButton!=null){
+            sweepButton.setEnabled(true);
+            sweepButton.setText("MAP SAFE READ COMMANDS");
         }
 
         identityText.setText(
@@ -978,7 +1026,8 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
                 "COMMAND/RESPONSE\n"+hex(r.command)+"\n\n"+
                 "STATUS ASCII\n"+printable(r.status)+
                 (r.probeAttempted?"\n\nDRYING COUNTER PROBE\n"+
-                        (r.probeSuccess?decodeProbeResponse(r.probeResponse):"FAILED: "+r.probeError):"")
+                        (r.probeSuccess?decodeProbeResponse(r.probeResponse):"FAILED: "+r.probeError):"")+
+                (r.sweepAttempted?"\n\nSAFE READ MAP\n"+join(r.sweepResults):"")
         );
 
         historyText.setText(historyDisplay());
@@ -986,7 +1035,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
 
         String when=new SimpleDateFormat("dd MMM yyyy HH:mm:ss",Locale.UK).format(new Date());
         lastCapture=
-                "Candy Dryer Lab MK8 passive capture\n"+
+                "Candy Dryer Lab MK12 capture\n"+
                 "Stage: "+stage+"\n"+
                 "Model: CS C10DF-80 / 31101151\n"+
                 "Time: "+when+"\n"+
@@ -1004,6 +1053,8 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
                 "Drying counter probe attempted: "+r.probeAttempted+"\n"+
                 "Drying counter probe success: "+r.probeSuccess+"\n"+
                 "Drying counter probe result: "+(r.probeSuccess?decodeProbeResponse(r.probeResponse):safe(r.probeError))+"\n"+
+                "Safe read sweep attempted: "+r.sweepAttempted+"\n"+
+                "Safe read sweep results:\n"+(r.sweepResults.isEmpty()?"—":join(r.sweepResults))+
                 "CC: "+hex(r.cc)+"\n"+
                 "STATUS: "+hex(r.status)+"\n"+
                 "COMMAND: "+hex(r.command)+"\n\n"+
@@ -1142,11 +1193,12 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
     }
 
     private static class ScanResult{
-        boolean ok,statusCrcValid,commandCrcValid,probeAttempted,probeSuccess;
+        boolean ok,statusCrcValid,commandCrcValid,probeAttempted,probeSuccess,sweepAttempted,sweepSuccess;
         String tech,error,uri,statusType,identity,productCode,descriptor,probeError;
         int commandMarker=-1,commandAction=-1;
         byte[] cc,status,command,commandData,probeResponse;
         List<String> log=new ArrayList<>();
+        List<String> sweepResults=new ArrayList<>();
     }
 
     private abstract static class SimpleSeek implements SeekBar.OnSeekBarChangeListener{
