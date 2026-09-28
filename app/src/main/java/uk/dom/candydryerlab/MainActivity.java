@@ -58,6 +58,8 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
     private TextView identityText, responseText, historyText, rawText;
     private TextView scanCountText, uniqueResponseText, lastSeenText;
     private Button stageButton, shareButton, statsProbeButton, sweepButton;
+    private LinearLayout advancedLab;
+    private TextView cycleStatusText, syncText;
     private volatile boolean statsProbeArmed=false;
     private volatile boolean safeSweepArmed=false;
 
@@ -93,154 +95,100 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
 
         LinearLayout root=new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(18),dp(16),dp(18),dp(40));
+        root.setPadding(dp(18),statusBarHeight()+dp(14),dp(18),dp(44));
         sv.addView(root,new ScrollView.LayoutParams(-1,-2));
 
-        LinearLayout titleRow=new LinearLayout(this);
-        titleRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView brand=txt("DRYER LAB",30,TEXT,true);
-        titleRow.addView(brand,new LinearLayout.LayoutParams(0,-2,1));
-        TextView offline=chip("OFFLINE");
-        titleRow.addView(offline);
-        root.addView(titleRow);
+        // Header
+        LinearLayout header=new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout heading=new LinearLayout(this);
+        heading.setOrientation(LinearLayout.VERTICAL);
+        TextView brand=txt("CANDY DRYER",29,TEXT,true);
+        TextView model=txt("CS C10DF-80  •  10 kg",13,MUTED,false);
+        heading.addView(brand);
+        heading.addView(model);
+        header.addView(heading,new LinearLayout.LayoutParams(0,-2,1));
+        TextView local=chip("LOCAL NFC");
+        header.addView(local,lp(-2,dp(34),0,0,0,0));
+        root.addView(header);
+        root.addView(space(14));
 
-        TextView model=txt("Candy CS C10DF-80  •  Product 31101151",14,MUTED,false);
-        model.setPadding(0,dp(2),0,dp(14));
-        root.addView(model);
-
-        LinearLayout badgeRow=new LinearLayout(this);
-        badgeRow.setOrientation(LinearLayout.HORIZONTAL);
-        badgeRow.addView(chip("NO ACCOUNT"),lp(-2,dp(34),0,0,8,0));
-        badgeRow.addView(chip("NO CLOUD"),lp(-2,dp(34),0,0,8,0));
-        badgeRow.addView(chip("NFC TYPE 4"),lp(-2,dp(34),0,0,0,0));
-        root.addView(badgeRow,lp(-1,-2,0,0,0,14));
-
+        // Main connection hero
         LinearLayout hero=card();
         hero.setGravity(Gravity.CENTER_HORIZONTAL);
-        linkState=txt("READY FOR NFC",13,CYAN,true);
+        linkState=txt("READY TO SYNC",12,CYAN,true);
+        linkState.setLetterSpacing(.10f);
         linkState.setGravity(Gravity.CENTER);
         hero.addView(linkState);
         linkGauge=new GaugeView(this);
-        hero.addView(linkGauge,new LinearLayout.LayoutParams(dp(250),dp(190)));
-        linkHint=txt("Turn the dial to Smart Touch and hold the phone on the NFC logo.",14,MUTED,false);
+        hero.addView(linkGauge,new LinearLayout.LayoutParams(dp(246),dp(184)));
+        cycleStatusText=txt("Smart Touch",21,TEXT,true);
+        cycleStatusText.setGravity(Gravity.CENTER);
+        hero.addView(cycleStatusText);
+        linkHint=txt("Hold your phone against the Smart Touch logo to sync.",13,MUTED,false);
         linkHint.setGravity(Gravity.CENTER);
+        linkHint.setPadding(dp(14),dp(5),dp(14),0);
         hero.addView(linkHint);
-        root.addView(hero,lp(-1,-2,0,0,0,16));
+        root.addView(hero,lp(-1,-2,0,0,0,18));
 
-        section(root,"LIVE DATA");
-        TextView sensorNote=txt("Values stay blank until the appliance exposes a field we can verify. No invented sensor readings.",12,MUTED,false);
-        sensorNote.setPadding(dp(2),0,0,dp(7));
-        root.addView(sensorNote);
+        // At a glance
+        section(root,"AT A GLANCE");
+        GridLayout glance=new GridLayout(this);
+        glance.setColumnCount(2);
+        syncText=infoCard(glance,"LAST SYNC","Never","Tap to update");
+        infoCard(glance,"CONNECTION","NFC","Direct to dryer");
+        infoCard(glance,"PRODUCT","31101151","Verified");
+        infoCard(glance,"ACCOUNT","None","Works offline");
+        root.addView(glance,lp(-1,-2,0,0,0,18));
+
+        // Live data
+        section(root,"DRYER STATUS");
+        LinearLayout live=card();
+        LinearLayout liveHead=new LinearLayout(this);
+        liveHead.setGravity(Gravity.CENTER_VERTICAL);
+        TextView liveTitle=txt("Live readings",20,TEXT,true);
+        liveHead.addView(liveTitle,new LinearLayout.LayoutParams(0,-2,1));
+        TextView verified=chip("VERIFIED ONLY");
+        liveHead.addView(verified);
+        live.addView(liveHead);
+
+        TextView sensorNote=txt("This dryer has not exposed these readings over NFC yet. Dryer Lab will populate them only when the fields are confirmed.",12,MUTED,false);
+        sensorNote.setPadding(0,dp(6),0,dp(10));
+        live.addView(sensorNote);
 
         GridLayout sensorGrid=new GridLayout(this);
         sensorGrid.setColumnCount(2);
-        moisture=sensor(sensorGrid,"MOISTURE","--","Awaiting verified field");
-        temperature=sensor(sensorGrid,"DRUM TEMP","-- °C","Awaiting verified field");
-        load=sensor(sensorGrid,"LOAD","-- kg","Awaiting verified field");
-        remaining=sensor(sensorGrid,"TIME LEFT","--","Awaiting verified field");
-        root.addView(sensorGrid,lp(-1,-2,0,0,0,16));
+        moisture=sensor(sensorGrid,"MOISTURE","—","Not exposed yet");
+        temperature=sensor(sensorGrid,"DRUM TEMP","—","Not exposed yet");
+        load=sensor(sensorGrid,"LOAD","—","Not exposed yet");
+        remaining=sensor(sensorGrid,"TIME LEFT","—","Not exposed yet");
+        live.addView(sensorGrid);
+        root.addView(live,lp(-1,-2,0,0,0,18));
 
-        section(root,"APPLIANCE");
-        LinearLayout appliance=card();
-        identityText=txt("Identity will be decoded on first scan.",14,TEXT,false);
-        appliance.addView(identityText);
-        ProgressBar confidence=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);
-        confidence.setMax(100);
-        confidence.setProgress(50);
-        appliance.addView(confidence,lp(-1,dp(10),0,14,0,5));
-        TextView confidenceText=txt("Protocol map  •  NFC transport + identity + CRC verified",12,MUTED,false);
-        appliance.addView(confidenceText);
-        root.addView(appliance,lp(-1,-2,0,0,0,16));
-
-        section(root,"LEARN MODE");
-        LinearLayout learn=card();
-        TextView learnTitle=txt("Map the dryer without Candy login",19,TEXT,true);
-        learn.addView(learnTitle);
-        TextView learnBody=txt(
-                "Choose what the dryer is doing, then scan. Dryer Lab stores only local captures and compares each NFC response with the previous one.",
-                13,MUTED,false);
-        learnBody.setPadding(0,dp(5),0,dp(12));
-        learn.addView(learnBody);
-
-        stageButton=button("CAPTURE STAGE: IDLE",false);
-        stageButton.setOnClickListener(v->{
-            stageIndex=(stageIndex+1)%stages.length;
-            stage=stages[stageIndex];
-            stageButton.setText("CAPTURE STAGE: "+stage.toUpperCase(Locale.UK));
-        });
-        learn.addView(stageButton,lp(-1,dp(50),0,0,0,10));
-
-        responseText=txt("Last response  •  waiting for NFC",13,TEXT,false);
-        responseText.setTypeface(Typeface.MONOSPACE);
-        learn.addView(responseText);
-
-        historyText=txt(historyDisplay(),12,MUTED,false);
-        historyText.setPadding(0,dp(12),0,0);
-        learn.addView(historyText);
-
-        LinearLayout learnActions=new LinearLayout(this);
-        Button clear=button("CLEAR HISTORY",true);
-        clear.setOnClickListener(v->{
-            prefs.edit()
-                    .remove("history")
-                    .remove("last_command_hex")
-                    .remove("unique_responses")
-                    .apply();
-            historyText.setText(historyDisplay());
-            refreshLocalStats();
-            Toast.makeText(this,"Local capture history cleared.",Toast.LENGTH_SHORT).show();
-        });
-        shareButton=button("SHARE LAST",true);
-        shareButton.setEnabled(false);
-        shareButton.setAlpha(.45f);
-        shareButton.setOnClickListener(v->shareCapture());
-        learnActions.addView(clear,new LinearLayout.LayoutParams(0,dp(48),1));
-        LinearLayout.LayoutParams sp=new LinearLayout.LayoutParams(dp(8),1);
-        learnActions.addView(new View(this),sp);
-        learnActions.addView(shareButton,new LinearLayout.LayoutParams(0,dp(48),1));
-        learn.addView(learnActions,lp(-1,dp(48),0,14,0,0));
-
-        statsProbeButton=button("READ DRYING COUNTERS",false);
-        statsProbeButton.setOnClickListener(v->{
-            statsProbeArmed=true;
-            statsProbeButton.setText("ARMED — HOLD PHONE ON SMART TOUCH");
-            statsProbeButton.setEnabled(false);
-            linkState.setText("DRYING COUNTER PROBE ARMED");
-            linkState.setTextColor(AMBER);
-            linkHint.setText("Keep the phone firmly on the Smart Touch area for about 3 seconds. This sends only the documented read opcode 0x11.");
-        });
-        learn.addView(statsProbeButton,lp(-1,dp(50),0,12,0,0));
-
-        sweepButton=button("MAP SAFE READ COMMANDS",true);
-        sweepButton.setOnClickListener(v->{
-            safeSweepArmed=true;
-            sweepButton.setText("ARMED — HOLD PHONE STEADY");
-            sweepButton.setEnabled(false);
-            linkState.setText("READ-ONLY MAP ARMED");
-            linkState.setTextColor(AMBER);
-            linkHint.setText("Hold the phone on Smart Touch until the sweep finishes. Only documented read opcodes 0x01–0x09 and 0x11 are tested.");
-        });
-        learn.addView(sweepButton,lp(-1,dp(50),0,10,0,0));
-
-        TextView probeNote=txt("Experimental interoperability probes only. Start/store/factory-test opcodes 0x0A, 0x0B and 0x0C are never sent.",11,MUTED,false);
-        learn.addView(probeNote);
-
-        root.addView(learn,lp(-1,-2,0,0,0,16));
-
-        section(root,"PROGRAMME STUDIO");
+        // Programmes
+        section(root,"PROGRAMMES");
         LinearLayout studio=card();
-        TextView studioTitle=txt("Build a local drying profile",19,TEXT,true);
+        TextView studioTitle=txt("Choose a favourite",20,TEXT,true);
         studio.addView(studioTitle);
-        TextView safety=txt(
-                "Profiles are stored on this phone. Sending them to the dryer remains locked until the model-specific command bytes are verified.",
-                12,AMBER,false);
-        safety.setPadding(0,dp(5),0,dp(14));
-        studio.addView(safety);
+        TextView studioSub=txt("Saved locally for now. Dryer transmission stays locked until the exact programme command format is verified for this model.",12,MUTED,false);
+        studioSub.setPadding(0,dp(5),0,dp(12));
+        studio.addView(studioSub);
+
+        GridLayout programmes=new GridLayout(this);
+        programmes.setColumnCount(2);
+        addProgrammeButton(programmes,"Cottons");
+        addProgrammeButton(programmes,"Synthetics");
+        addProgrammeButton(programmes,"Rapid");
+        addProgrammeButton(programmes,"Refresh");
+        addProgrammeButton(programmes,"Shirts");
+        addProgrammeButton(programmes,"Timed");
+        studio.addView(programmes);
 
         int savedDry=prefs.getInt("profile_dry",2);
         int savedTime=prefs.getInt("profile_time",0);
 
         TextView dryLabel=txt("Dryness  •  "+drynessName(savedDry),14,TEXT,true);
+        dryLabel.setPadding(0,dp(16),0,0);
         studio.addView(dryLabel);
         SeekBar dry=new SeekBar(this);
         dry.setMax(3);
@@ -252,7 +200,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
             }
         });
 
-        TextView timeLabel=txt(savedTime==0?"Timed dry  •  Auto sensor":"Timed dry  •  "+(savedTime*15)+" min",14,TEXT,true);
+        TextView timeLabel=txt(savedTime==0?"Timed dry  •  Auto":"Timed dry  •  "+(savedTime*15)+" min",14,TEXT,true);
         timeLabel.setPadding(0,dp(8),0,0);
         studio.addView(timeLabel);
         SeekBar time=new SeekBar(this);
@@ -261,7 +209,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         studio.addView(time);
         time.setOnSeekBarChangeListener(new SimpleSeek(){
             public void onProgressChanged(SeekBar s,int v,boolean u){
-                timeLabel.setText(v==0?"Timed dry  •  Auto sensor":"Timed dry  •  "+(v*15)+" min");
+                timeLabel.setText(v==0?"Timed dry  •  Auto":"Timed dry  •  "+(v*15)+" min");
             }
         });
 
@@ -275,7 +223,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         studio.addView(gentle);
         studio.addView(low);
 
-        Button save=button("SAVE PROFILE LOCALLY",false);
+        Button save=button("SAVE FAVOURITE",false);
         save.setOnClickListener(v->{
             prefs.edit()
                     .putInt("profile_dry",dry.getProgress())
@@ -284,30 +232,161 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
                     .putBoolean("profile_gentle",gentle.isChecked())
                     .putBoolean("profile_low",low.isChecked())
                     .apply();
-            Toast.makeText(this,"Drying profile saved on this phone.",Toast.LENGTH_SHORT).show();
+            Toast.makeText(this,"Favourite saved locally.",Toast.LENGTH_SHORT).show();
         });
-        studio.addView(save,lp(-1,dp(50),0,12,0,0));
-        root.addView(studio,lp(-1,-2,0,0,0,16));
+        studio.addView(save,lp(-1,dp(50),0,14,0,0));
+        root.addView(studio,lp(-1,-2,0,0,0,18));
 
-        section(root,"LOCAL STATISTICS");
+        // Statistics
+        section(root,"STATISTICS");
         GridLayout statsGrid=new GridLayout(this);
         statsGrid.setColumnCount(3);
-        scanCountText=stat(statsGrid,"SCANS","0");
+        scanCountText=stat(statsGrid,"NFC SCANS","0");
         uniqueResponseText=stat(statsGrid,"RESPONSES","0");
         lastSeenText=stat(statsGrid,"LAST SEEN","—");
-        root.addView(statsGrid,lp(-1,-2,0,0,0,16));
+        root.addView(statsGrid,lp(-1,-2,0,0,0,10));
 
-        section(root,"PROTOCOL INSPECTOR");
-        LinearLayout protocol=card();
-        rawText=txt("Scan the dryer to inspect the decoded Type-4 records.",12,MUTED,false);
+        LinearLayout statsInfo=card();
+        TextView statsTitle=txt("Dryer lifetime data",17,TEXT,true);
+        statsInfo.addView(statsTitle);
+        TextView statsBody=txt("Cycle counters and diagnostic history will appear here once the tumble-dryer response layout is mapped.",12,MUTED,false);
+        statsBody.setPadding(0,dp(5),0,0);
+        statsInfo.addView(statsBody);
+        root.addView(statsInfo,lp(-1,-2,0,0,0,18));
+
+        // Device card
+        section(root,"DEVICE");
+        LinearLayout appliance=card();
+        identityText=txt("Candy CS C10DF-80\nProduct 31101151\nWaiting for first NFC sync.",13,TEXT,false);
+        appliance.addView(identityText);
+        root.addView(appliance,lp(-1,-2,0,0,0,18));
+
+        // Advanced tools - hidden by default
+        Button labToggle=button("ADVANCED DIAGNOSTICS",true);
+        root.addView(labToggle,lp(-1,dp(52),0,0,0,10));
+
+        advancedLab=card();
+        advancedLab.setVisibility(View.GONE);
+
+        TextView labTitle=txt("Protocol Lab",20,TEXT,true);
+        advancedLab.addView(labTitle);
+        TextView labSub=txt("Developer tools for mapping the dryer protocol. You normally do not need this section.",12,MUTED,false);
+        labSub.setPadding(0,dp(5),0,dp(12));
+        advancedLab.addView(labSub);
+
+        stageButton=button("CAPTURE STAGE: IDLE",true);
+        stageButton.setOnClickListener(v->{
+            stageIndex=(stageIndex+1)%stages.length;
+            stage=stages[stageIndex];
+            stageButton.setText("CAPTURE STAGE: "+stage.toUpperCase(Locale.UK));
+        });
+        advancedLab.addView(stageButton,lp(-1,dp(48),0,0,0,8));
+
+        responseText=txt("No decoded response yet.",12,TEXT,false);
+        responseText.setTypeface(Typeface.MONOSPACE);
+        advancedLab.addView(responseText);
+
+        historyText=txt(historyDisplay(),11,MUTED,false);
+        historyText.setPadding(0,dp(10),0,dp(4));
+        advancedLab.addView(historyText);
+
+        statsProbeButton=button("READ DRYING COUNTERS",false);
+        statsProbeButton.setOnClickListener(v->{
+            statsProbeArmed=true;
+            statsProbeButton.setText("ARMED — TAP DRYER");
+            statsProbeButton.setEnabled(false);
+            linkState.setText("COUNTER READ ARMED");
+            linkState.setTextColor(AMBER);
+            linkHint.setText("Move the phone away, then hold it on Smart Touch until the read completes.");
+        });
+        advancedLab.addView(statsProbeButton,lp(-1,dp(50),0,12,0,0));
+
+        sweepButton=button("MAP SAFE READ COMMANDS",true);
+        sweepButton.setOnClickListener(v->{
+            safeSweepArmed=true;
+            sweepButton.setText("ARMED — TAP DRYER");
+            sweepButton.setEnabled(false);
+            linkState.setText("READ MAP ARMED");
+            linkState.setTextColor(AMBER);
+            linkHint.setText("Move the phone away, then hold it on Smart Touch until mapping completes.");
+        });
+        advancedLab.addView(sweepButton,lp(-1,dp(50),0,10,0,0));
+
+        shareButton=button("SHARE LAST CAPTURE",true);
+        shareButton.setEnabled(false);
+        shareButton.setAlpha(.45f);
+        shareButton.setOnClickListener(v->shareCapture());
+        advancedLab.addView(shareButton,lp(-1,dp(50),0,10,0,0));
+
+        rawText=txt("Raw protocol data will appear after a scan.",11,MUTED,false);
         rawText.setTypeface(Typeface.MONOSPACE);
-        protocol.addView(rawText);
-        root.addView(protocol,lp(-1,-2,0,0,0,16));
+        rawText.setPadding(0,dp(14),0,0);
+        advancedLab.addView(rawText);
 
-        TextView footer=txt("Dryer Lab MK12  •  account-free  •  verified state-control handshake  •  safe read mapper",11,MUTED,false);
+        Button clear=button("CLEAR LAB HISTORY",true);
+        clear.setOnClickListener(v->{
+            prefs.edit().remove("history").remove("last_command_hex").remove("unique_responses").apply();
+            historyText.setText(historyDisplay());
+            refreshLocalStats();
+            Toast.makeText(this,"Lab history cleared.",Toast.LENGTH_SHORT).show();
+        });
+        advancedLab.addView(clear,lp(-1,dp(48),0,14,0,0));
+
+        root.addView(advancedLab,lp(-1,-2,0,0,0,18));
+
+        labToggle.setOnClickListener(v->{
+            boolean open=advancedLab.getVisibility()!=View.VISIBLE;
+            advancedLab.setVisibility(open?View.VISIBLE:View.GONE);
+            labToggle.setText(open?"HIDE ADVANCED DIAGNOSTICS":"ADVANCED DIAGNOSTICS");
+        });
+
+        TextView footer=txt("Dryer Lab MK13  •  local  •  account-free  •  no cloud",11,MUTED,false);
         footer.setGravity(Gravity.CENTER);
         root.addView(footer);
         return sv;
+    }
+
+    private void addProgrammeButton(GridLayout grid,String name){
+        Button b=button(name.toUpperCase(Locale.UK),true);
+        b.setOnClickListener(v->{
+            prefs.edit().putString("profile_program",name).apply();
+            Toast.makeText(this,name+" selected for your local favourite.",Toast.LENGTH_SHORT).show();
+        });
+        GridLayout.LayoutParams gp=new GridLayout.LayoutParams();
+        gp.width=0;
+        gp.height=dp(50);
+        gp.columnSpec=GridLayout.spec(GridLayout.UNDEFINED,1f);
+        gp.setMargins(dp(3),dp(3),dp(3),dp(3));
+        grid.addView(b,gp);
+    }
+
+    private TextView infoCard(GridLayout grid,String title,String value,String sub){
+        LinearLayout box=cardSmall();
+        TextView t=txt(title,10,MUTED,true);
+        TextView v=txt(value,20,TEXT,true);
+        v.setPadding(0,dp(4),0,0);
+        TextView s=txt(sub,11,MUTED,false);
+        box.addView(t);
+        box.addView(v);
+        box.addView(s);
+        GridLayout.LayoutParams gp=new GridLayout.LayoutParams();
+        gp.width=0;
+        gp.height=dp(104);
+        gp.columnSpec=GridLayout.spec(GridLayout.UNDEFINED,1f);
+        gp.setMargins(dp(3),dp(3),dp(3),dp(3));
+        grid.addView(box,gp);
+        return v;
+    }
+
+    private View space(int height){
+        View v=new View(this);
+        v.setLayoutParams(new LinearLayout.LayoutParams(1,dp(height)));
+        return v;
+    }
+
+    private int statusBarHeight(){
+        int id=getResources().getIdentifier("status_bar_height","dimen","android");
+        return id>0?getResources().getDimensionPixelSize(id):dp(24);
     }
 
     private String drynessName(int v){
@@ -455,7 +534,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
             linkState.setText("TURN NFC ON");
             linkState.setTextColor(AMBER);
         }else{
-            linkState.setText("READY FOR NFC");
+            linkState.setText("READY TO SYNC");
             linkState.setTextColor(CYAN);
         }
     }
@@ -966,6 +1045,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         if(r.command!=null)unique.add(nowHex);
 
         String clock=new SimpleDateFormat("HH:mm:ss",Locale.UK).format(new Date());
+        if(syncText!=null)syncText.setText(clock);
         String history=prefs.getString("history","");
         String entry=clock+"  "+stage+"  •  action 0x"+String.format(Locale.ROOT,"%02X",r.commandAction)+"  •  "+change;
         history=appendHistory(history,entry);
@@ -979,7 +1059,8 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
                 .apply();
 
         linkGauge.setValue(100);
-        linkGauge.setCenter("LINK","LIVE");
+        linkGauge.setCenter("SYNC","OK");
+        if(cycleStatusText!=null)cycleStatusText.setText("Connected to dryer");
         if(r.sweepAttempted){
             linkState.setText("READ-ONLY MAP COMPLETE");
             linkState.setTextColor(GREEN);
@@ -1035,7 +1116,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
 
         String when=new SimpleDateFormat("dd MMM yyyy HH:mm:ss",Locale.UK).format(new Date());
         lastCapture=
-                "Candy Dryer Lab MK12 capture\n"+
+                "Candy Dryer Lab MK13 capture\n"+
                 "Stage: "+stage+"\n"+
                 "Model: CS C10DF-80 / 31101151\n"+
                 "Time: "+when+"\n"+
