@@ -292,7 +292,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         protocol.addView(rawText);
         root.addView(protocol,lp(-1,-2,0,0,0,16));
 
-        TextView footer=txt("Dryer Lab MK9  •  account-free  •  no Internet permission  •  passive scan + read-only counter probe",11,MUTED,false);
+        TextView footer=txt("Dryer Lab MK10  •  account-free  •  direct M24SR interrupt probe  •  no Internet permission",11,MUTED,false);
         footer.setGravity(Gravity.CENTER);
         root.addView(footer);
         return sv;
@@ -587,13 +587,16 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
     }
 
     private byte[] runReadOnlyProbe(IsoDep iso,NdefFileInfo commandFile,int action,String label,List<String> log)throws Exception{
+        probeProgress("TAG FOUND","Opening Candy NFC command mailbox…");
+
         selectNdefApp(iso,label,log);
         byte hi=(byte)((commandFile.id>>8)&255);
         byte lo=(byte)(commandFile.id&255);
         requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x00,0x0C,0x02,hi,lo},
                 label+" SELECT COMMAND FILE",log),label+" command select");
 
-        // Empty VERIFY is only a lock-state probe and does not consume retries.
+        probeProgress("UNLOCKING","Checking command-file write access…");
+        // Empty VERIFY is a lock-state probe and does not consume password retries.
         byte[] lockProbe=x(iso,new byte[]{0x00,0x20,0x00,0x02,0x00},
                 label+" VERIFY STATUS",log);
         if(isOk(lockProbe)){
@@ -609,6 +612,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
             throw new Exception("unexpected VERIFY status "+hex(lockProbe));
         }
 
+        probeProgress("WRITING QUERY","Staging read-only drying-counter request 0x11…");
         byte[] record=buildReadRecord(action);
         requireOk(x(iso,new byte[]{0x00,(byte)0xD6,0x00,0x00,0x02,0x00,0x00},
                 label+" INVALIDATE NLEN",log),label+" invalidate");
@@ -621,33 +625,70 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         byte[] commit=new byte[]{0x00,(byte)0xD6,0x00,0x00,0x02,0x00,(byte)record.length};
         requireOk(x(iso,commit,label+" COMMIT NLEN",log),label+" commit");
 
+        int gpoConfig=readRfGpoConfig(iso,label,log);
+        log.add(label+" SYSTEM GPO CONFIG BYTE = "+String.format(Locale.ROOT,"%02X",gpoConfig));
+
+        probeProgress("NOTIFYING DRYER",
+                "Query written. Sending the M24SR hardware interrupt; keep phone still…");
         Thread.sleep(200);
-        pulseGpo(iso,0x00,label+" GPO LOW",log);
-        Thread.sleep(1200);
-        pulseGpo(iso,0x01,label+" GPO HIGH",log);
+        sendGpoInterrupt(iso,label,log);
 
         byte[] last=null;
-        for(int i=0;i<10;i++){
-            Thread.sleep(350);
+        for(int i=0;i<12;i++){
+            probeProgress("WAITING FOR DRYER","Waiting for MCU response… "+(i+1)+"/12");
+            Thread.sleep(300);
             last=readNdefFile(iso,commandFile,label+" POLL "+(i+1),log);
             if(last!=null && last.length>=8){
                 int marker=last[4]&255;
                 int gotAction=last[5]&255;
                 if(marker==0x00 && gotAction==action){
+                    probeProgress("RESPONSE RECEIVED","Dryer acknowledged opcode 0x"+
+                            String.format(Locale.ROOT,"%02X",action)+".");
                     return last;
                 }
             }
         }
-        throw new Exception("no ACK for opcode 0x"+String.format(Locale.ROOT,"%02X",action)+
-                "; last response "+hex(last));
+        throw new Exception("MCU did not consume query; GPO config="+
+                String.format(Locale.ROOT,"%02X",gpoConfig)+
+                ", last response "+hex(last));
     }
 
-    private void pulseGpo(IsoDep iso,int value,String label,List<String> log)throws Exception{
-        selectNdefApp(iso,label,log);
+    private int readRfGpoConfig(IsoDep iso,String label,List<String> log)throws Exception{
+        selectNdefApp(iso,label+" GPO CONFIG",log);
         requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x00,0x0C,0x02,(byte)0xE1,0x01},
-                label+" SELECT SYSTEM FILE",log),label+" system select");
-        requireOk(x(iso,new byte[]{(byte)0xA2,(byte)0xD6,0x00,0x1F,0x01,(byte)value},
-                label,log),label);
+                label+" GPO CONFIG SELECT SYSTEM FILE",log),label+" system select");
+        byte[] r=x(iso,new byte[]{0x00,(byte)0xB0,0x00,0x04,0x01},
+                label+" READ GPO CONFIG @0004",log);
+        requireReadable(r,label+" GPO config");
+        byte[] d=stripStatus(r);
+        if(d.length<1)throw new Exception("empty GPO config response");
+        return d[0]&255;
+    }
+
+    private void sendGpoInterrupt(IsoDep iso,String label,List<String> log)throws Exception{
+        selectNdefApp(iso,label+" INTERRUPT",log);
+        requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x00,0x0C,0x02,(byte)0xE1,0x01},
+                label+" INTERRUPT SELECT SYSTEM FILE",log),label+" system select");
+
+        // M24SR SendInterrupt command: generates a negative pulse on GPO.
+        byte[] r=x(iso,new byte[]{(byte)0xA2,(byte)0xD6,0x00,0x1E,0x00},
+                label+" SEND INTERRUPT",log);
+        if(!isOk(r)){
+            if(r.length>=2 && (r[r.length-2]&255)==0x6A && (r[r.length-1]&255)==0x80){
+                throw new Exception("GPO is not configured for RF interrupt mode (6A80)");
+            }
+            throw new Exception("SendInterrupt rejected "+hex(r));
+        }
+    }
+
+    private void probeProgress(String title,String detail){
+        main.post(()->{
+            if(linkState!=null){
+                linkState.setText(title);
+                linkState.setTextColor(CYAN);
+            }
+            if(linkHint!=null)linkHint.setText(detail);
+        });
     }
 
     private static byte[] buildReadRecord(int action){
