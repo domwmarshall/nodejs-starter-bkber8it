@@ -749,6 +749,16 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         }
     }
 
+    private void probeProgress(String title,String detail){
+        main.post(()->{
+            if(linkState!=null){
+                linkState.setText(title);
+                linkState.setTextColor(CYAN);
+            }
+            if(linkHint!=null)linkHint.setText(detail);
+        });
+    }
+
     private static byte[] buildReadRecord(int action){
         byte[] rec=new byte[8];
         rec[0]=(byte)0xD4;
