@@ -290,14 +290,14 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         historyText.setPadding(0,dp(10),0,dp(4));
         advancedLab.addView(historyText);
 
-        statsProbeButton=button("READ DRYING COUNTERS",false);
+        statsProbeButton=button("SYNC DRYER DATA",false);
         statsProbeButton.setOnClickListener(v->{
             statsProbeArmed=true;
-            statsProbeButton.setText("ARMED — TAP DRYER");
+            statsProbeButton.setText("ARMED — HOLD PHONE ON DRYER");
             statsProbeButton.setEnabled(false);
-            linkState.setText("COUNTER READ ARMED");
+            linkState.setText("DRYER SYNC ARMED");
             linkState.setTextColor(AMBER);
-            linkHint.setText("Move the phone away, then hold it on Smart Touch until the read completes.");
+            linkHint.setText("Move the phone away, then hold it steadily on Smart Touch until the sync finishes.");
         });
         advancedLab.addView(statsProbeButton,lp(-1,dp(50),0,12,0,0));
 
@@ -310,7 +310,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
             linkState.setTextColor(AMBER);
             linkHint.setText("Move the phone away, then hold it on Smart Touch until mapping completes.");
         });
-        advancedLab.addView(sweepButton,lp(-1,dp(50),0,10,0,0));
+        sweepButton.setVisibility(View.GONE);
 
         shareButton=button("SHARE LAST CAPTURE",true);
         shareButton.setEnabled(false);
@@ -340,7 +340,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
             labToggle.setText(open?"HIDE ADVANCED DIAGNOSTICS":"ADVANCED DIAGNOSTICS");
         });
 
-        TextView footer=txt("Dryer Lab MK13  •  local  •  account-free  •  no cloud",11,MUTED,false);
+        TextView footer=txt("Dryer Lab MK14  •  local  •  account-free  •  no cloud",11,MUTED,false);
         footer.setGravity(Gravity.CENTER);
         root.addView(footer);
         return sv;
@@ -1025,7 +1025,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
             rawText.setText(join(r.log));
             if(statsProbeButton!=null){
                 statsProbeButton.setEnabled(true);
-                statsProbeButton.setText("READ DRYING COUNTERS");
+                statsProbeButton.setText("SYNC DRYER DATA");
             }
             if(sweepButton!=null){
                 sweepButton.setEnabled(true);
@@ -1066,7 +1066,11 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         }else if(resultProbeLabel(r).length()>0){
             linkState.setText(r.probeSuccess?"DRYING COUNTERS RECEIVED":"DRYING COUNTER PROBE FAILED");
             linkState.setTextColor(r.probeSuccess?GREEN:AMBER);
-            linkHint.setText(r.probeSuccess?decodeProbeResponse(r.probeResponse):r.probeError);
+            linkHint.setText(r.probeSuccess?
+                    ((r.probeResponse!=null && r.probeResponse.length==8)?
+                            "Dryer accepted the query, but this firmware returned no counter payload.":
+                            decodeProbeResponse(r.probeResponse))
+                    :r.probeError);
         }else{
             linkState.setText("DRYER CONNECTED");
             linkState.setTextColor(GREEN);
@@ -1074,7 +1078,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         }
         if(statsProbeButton!=null){
             statsProbeButton.setEnabled(true);
-            statsProbeButton.setText("READ DRYING COUNTERS");
+            statsProbeButton.setText("SYNC DRYER DATA");
         }
         if(sweepButton!=null){
             sweepButton.setEnabled(true);
@@ -1114,7 +1118,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
 
         String when=new SimpleDateFormat("dd MMM yyyy HH:mm:ss",Locale.UK).format(new Date());
         lastCapture=
-                "Candy Dryer Lab MK13 capture\n"+
+                "Candy Dryer Lab MK14 capture\n"+
                 "Stage: "+stage+"\n"+
                 "Model: CS C10DF-80 / 31101151\n"+
                 "Time: "+when+"\n"+
