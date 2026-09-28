@@ -292,7 +292,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         protocol.addView(rawText);
         root.addView(protocol,lp(-1,-2,0,0,0,16));
 
-        TextView footer=txt("Dryer Lab MK10  •  account-free  •  direct M24SR interrupt probe  •  no Internet permission",11,MUTED,false);
+        TextView footer=txt("Dryer Lab MK11  •  account-free  •  state-control GPO probe  •  automatic mailbox cleanup",11,MUTED,false);
         footer.setGravity(Gravity.CENTER);
         root.addView(footer);
         return sv;
@@ -589,6 +589,16 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
     private byte[] runReadOnlyProbe(IsoDep iso,NdefFileInfo commandFile,int action,String label,List<String> log)throws Exception{
         probeProgress("TAG FOUND","Opening Candy NFC command mailbox…");
 
+        // Preserve a safe response record so a failed experiment never leaves
+        // a pending command sitting in file 0002 after the phone is removed.
+        byte[] restoreRecord=readNdefFile(iso,commandFile,label+" BACKUP",log);
+        if(restoreRecord!=null && restoreRecord.length>=8 && (restoreRecord[4]&255)==0x80){
+            // MK9/MK10 may already have left the known 0x11 probe pending.
+            // This exact response is the baseline captured from this dryer before probing.
+            restoreRecord=new byte[]{(byte)0xD4,0x01,0x04,0x02,0x00,0x0F,(byte)0xFF,(byte)0xF9};
+            log.add(label+" BACKUP was pending; using captured baseline response D4 01 04 02 00 0F FF F9 for cleanup");
+        }
+
         selectNdefApp(iso,label,log);
         byte hi=(byte)((commandFile.id>>8)&255);
         byte lo=(byte)(commandFile.id&255);
@@ -596,61 +606,71 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
                 label+" SELECT COMMAND FILE",log),label+" command select");
 
         probeProgress("UNLOCKING","Checking command-file write access…");
-        // Empty VERIFY is a lock-state probe and does not consume password retries.
         byte[] lockProbe=x(iso,new byte[]{0x00,0x20,0x00,0x02,0x00},
                 label+" VERIFY STATUS",log);
-        if(isOk(lockProbe)){
-            log.add(label+" write area already unlocked");
-        }else if(lockProbe.length>=2 && (lockProbe[lockProbe.length-2]&255)==0x63){
-            byte[] verify=new byte[21];
-            verify[0]=0x00; verify[1]=0x20; verify[2]=0x00; verify[3]=0x02; verify[4]=0x10;
-            byte[] vr=x(iso,verify,label+" VERIFY 16-ZERO WRITE PASSWORD",log);
-            if(!isOk(vr)){
-                throw new Exception("write password rejected "+hex(vr)+"; stopped without retrying");
+        if(!isOk(lockProbe)){
+            if(lockProbe.length>=2 && (lockProbe[lockProbe.length-2]&255)==0x63){
+                byte[] verify=new byte[21];
+                verify[0]=0x00; verify[1]=0x20; verify[2]=0x00; verify[3]=0x02; verify[4]=0x10;
+                byte[] vr=x(iso,verify,label+" VERIFY 16-ZERO WRITE PASSWORD",log);
+                if(!isOk(vr)){
+                    throw new Exception("write password rejected "+hex(vr)+"; stopped without retrying");
+                }
+            }else{
+                throw new Exception("unexpected VERIFY status "+hex(lockProbe));
             }
-        }else{
-            throw new Exception("unexpected VERIFY status "+hex(lockProbe));
         }
 
-        probeProgress("WRITING QUERY","Staging read-only drying-counter request 0x11…");
         byte[] record=buildReadRecord(action);
-        requireOk(x(iso,new byte[]{0x00,(byte)0xD6,0x00,0x00,0x02,0x00,0x00},
-                label+" INVALIDATE NLEN",log),label+" invalidate");
-
-        byte[] write=new byte[5+record.length];
-        write[0]=0x00; write[1]=(byte)0xD6; write[2]=0x00; write[3]=0x02; write[4]=(byte)record.length;
-        System.arraycopy(record,0,write,5,record.length);
-        requireOk(x(iso,write,label+" WRITE READ-QUERY",log),label+" query write");
-
-        byte[] commit=new byte[]{0x00,(byte)0xD6,0x00,0x00,0x02,0x00,(byte)record.length};
-        requireOk(x(iso,commit,label+" COMMIT NLEN",log),label+" commit");
+        writeNdefRecord(iso,commandFile,record,label+" WRITE QUERY",log);
 
         int gpoConfig=readRfGpoConfig(iso,label,log);
-        log.add(label+" SYSTEM GPO CONFIG BYTE = "+String.format(Locale.ROOT,"%02X",gpoConfig));
+        int rfMode=(gpoConfig>>4)&0x07;
+        int i2cMode=gpoConfig&0x07;
+        log.add(label+" GPO CONFIG = "+String.format(Locale.ROOT,"%02X",gpoConfig)+
+                " RF="+gpoModeName(rfMode)+" I2C="+gpoModeName(i2cMode));
+
+        if(rfMode!=0x05){
+            restoreMailbox(iso,commandFile,restoreRecord,label,log);
+            throw new Exception("RF GPO mode is "+gpoModeName(rfMode)+
+                    ", not STATE CONTROL; query restored");
+        }
 
         probeProgress("NOTIFYING DRYER",
-                "Query written. Sending the M24SR hardware interrupt; keep phone still…");
-        Thread.sleep(200);
-        sendGpoInterrupt(iso,label,log);
+                "GPO is STATE CONTROL. Holding it LOW while the dryer reads the query…");
 
-        byte[] last=null;
-        for(int i=0;i<12;i++){
-            probeProgress("WAITING FOR DRYER","Waiting for MCU response… "+(i+1)+"/12");
-            Thread.sleep(300);
-            last=readNdefFile(iso,commandFile,label+" POLL "+(i+1),log);
-            if(last!=null && last.length>=8){
-                int marker=last[4]&255;
-                int gotAction=last[5]&255;
-                if(marker==0x00 && gotAction==action){
-                    probeProgress("RESPONSE RECEIVED","Dryer acknowledged opcode 0x"+
-                            String.format(Locale.ROOT,"%02X",action)+".");
-                    return last;
+        boolean released=false;
+        try{
+            setGpoState(iso,0x00,label+" GPO LOW",log);
+
+            byte[] last=null;
+            for(int i=0;i<16;i++){
+                probeProgress("WAITING FOR DRYER","GPO LOW • waiting for MCU response… "+(i+1)+"/16");
+                Thread.sleep(300);
+                last=readNdefFile(iso,commandFile,label+" LOW POLL "+(i+1),log);
+
+                if(last!=null && last.length>=8){
+                    int marker=last[4]&255;
+                    int gotAction=last[5]&255;
+                    if(marker==0x00 && gotAction==action){
+                        setGpoState(iso,0x01,label+" GPO RELEASE",log);
+                        released=true;
+                        probeProgress("RESPONSE RECEIVED",
+                                "Dryer acknowledged opcode 0x"+String.format(Locale.ROOT,"%02X",action)+".");
+                        return last;
+                    }
                 }
             }
+
+            setGpoState(iso,0x01,label+" GPO RELEASE",log);
+            released=true;
+            restoreMailbox(iso,commandFile,restoreRecord,label,log);
+            throw new Exception("no ACK while GPO held LOW for ~4.8 s; mailbox restored; last response "+hex(last));
+        }finally{
+            if(!released){
+                try{setGpoState(iso,0x01,label+" GPO FAILSAFE RELEASE",log);}catch(Exception ignored){}
+            }
         }
-        throw new Exception("MCU did not consume query; GPO config="+
-                String.format(Locale.ROOT,"%02X",gpoConfig)+
-                ", last response "+hex(last));
     }
 
     private int readRfGpoConfig(IsoDep iso,String label,List<String> log)throws Exception{
@@ -665,30 +685,68 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback 
         return d[0]&255;
     }
 
-    private void sendGpoInterrupt(IsoDep iso,String label,List<String> log)throws Exception{
-        selectNdefApp(iso,label+" INTERRUPT",log);
-        requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x00,0x0C,0x02,(byte)0xE1,0x01},
-                label+" INTERRUPT SELECT SYSTEM FILE",log),label+" system select");
-
-        // M24SR SendInterrupt command: generates a negative pulse on GPO.
-        byte[] r=x(iso,new byte[]{(byte)0xA2,(byte)0xD6,0x00,0x1E,0x00},
-                label+" SEND INTERRUPT",log);
-        if(!isOk(r)){
-            if(r.length>=2 && (r[r.length-2]&255)==0x6A && (r[r.length-1]&255)==0x80){
-                throw new Exception("GPO is not configured for RF interrupt mode (6A80)");
-            }
-            throw new Exception("SendInterrupt rejected "+hex(r));
+    private static String gpoModeName(int mode){
+        switch(mode&0x07){
+            case 0x00:return "HIGH-Z";
+            case 0x01:return "SESSION OPEN";
+            case 0x02:return "WIP";
+            case 0x03:return "MIP/ANSWER READY";
+            case 0x04:return "INTERRUPT";
+            case 0x05:return "STATE CONTROL";
+            case 0x06:return "RF BUSY/RFU";
+            default:return "RFU";
         }
     }
 
-    private void probeProgress(String title,String detail){
-        main.post(()->{
-            if(linkState!=null){
-                linkState.setText(title);
-                linkState.setTextColor(CYAN);
+    private void setGpoState(IsoDep iso,int value,String label,List<String> log)throws Exception{
+        selectNdefApp(iso,label,log);
+        requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x00,0x0C,0x02,(byte)0xE1,0x01},
+                label+" SELECT SYSTEM FILE",log),label+" system select");
+        requireOk(x(iso,new byte[]{(byte)0xA2,(byte)0xD6,0x00,0x1F,0x01,(byte)value},
+                label,log),label);
+    }
+
+    private void writeNdefRecord(IsoDep iso,NdefFileInfo file,byte[] record,String label,List<String> log)throws Exception{
+        selectNdefApp(iso,label,log);
+        byte hi=(byte)((file.id>>8)&255);
+        byte lo=(byte)(file.id&255);
+        requireOk(x(iso,new byte[]{0x00,(byte)0xA4,0x00,0x0C,0x02,hi,lo},
+                label+" SELECT FILE",log),label+" select");
+
+        byte[] lockProbe=x(iso,new byte[]{0x00,0x20,0x00,0x02,0x00},
+                label+" VERIFY STATUS",log);
+        if(!isOk(lockProbe)){
+            if(lockProbe.length>=2 && (lockProbe[lockProbe.length-2]&255)==0x63){
+                byte[] verify=new byte[21];
+                verify[0]=0x00; verify[1]=0x20; verify[2]=0x00; verify[3]=0x02; verify[4]=0x10;
+                requireOk(x(iso,verify,label+" VERIFY WRITE PASSWORD",log),label+" verify");
+            }else{
+                throw new Exception(label+" unexpected VERIFY status "+hex(lockProbe));
             }
-            if(linkHint!=null)linkHint.setText(detail);
-        });
+        }
+
+        requireOk(x(iso,new byte[]{0x00,(byte)0xD6,0x00,0x00,0x02,0x00,0x00},
+                label+" INVALIDATE NLEN",log),label+" invalidate");
+
+        byte[] write=new byte[5+record.length];
+        write[0]=0x00; write[1]=(byte)0xD6; write[2]=0x00; write[3]=0x02; write[4]=(byte)record.length;
+        System.arraycopy(record,0,write,5,record.length);
+        requireOk(x(iso,write,label+" WRITE",log),label+" write");
+
+        byte[] commit=new byte[]{0x00,(byte)0xD6,0x00,0x00,0x02,
+                (byte)((record.length>>8)&255),(byte)(record.length&255)};
+        requireOk(x(iso,commit,label+" COMMIT NLEN",log),label+" commit");
+    }
+
+    private void restoreMailbox(IsoDep iso,NdefFileInfo file,byte[] restore,String label,List<String> log){
+        if(restore==null||restore.length==0)return;
+        try{
+            probeProgress("CLEANING UP","Restoring the previous response record…");
+            writeNdefRecord(iso,file,restore,label+" RESTORE",log);
+            log.add(label+" mailbox restored to "+hex(restore));
+        }catch(Exception e){
+            log.add(label+" RESTORE FAILED: "+e.getMessage());
+        }
     }
 
     private static byte[] buildReadRecord(int action){
